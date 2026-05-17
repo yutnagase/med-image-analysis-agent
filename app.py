@@ -280,9 +280,13 @@ def step2_search_guidelines(findings: str) -> str:
     prompt = (
         f"以下は画像解析で得られた所見です:\n\n{findings}\n\n"
         f"以下は利用可能な臨床ガイドラインです:\n\n{guidelines_text}\n\n"
+        "【重要な判断基準】\n"
+        "- 所見で異常が明確に指摘されている場合のみ、該当する疾患ガイドラインを選択してください。\n"
+        "- 所見が全て正常範囲内（異常なし・否定的所見のみ）の場合は、"
+        "'normal'（正常所見）ガイドラインのみを選択してください。\n"
+        "- '否定された'所見に対応する疾患ガイドラインを適用してはいけません。\n\n"
         "上記の所見に最も関連するガイドラインを選択し、"
         "なぜそのガイドラインが適用されるのか理由を含めて日本語で回答してください。"
-        "該当するガイドラインが複数ある場合はすべて挙げてください。"
     )
 
     return call_llm(
@@ -290,7 +294,10 @@ def step2_search_guidelines(findings: str) -> str:
         system=(
             "You are a clinical decision support agent. "
             "Based on imaging findings, search and retrieve the most relevant "
-            "clinical guidelines. Explain your reasoning. "
+            "clinical guidelines. "
+            "CRITICAL: If all findings are normal (no abnormalities detected), "
+            "you MUST select ONLY the 'normal' guideline. "
+            "Do NOT select disease-specific guidelines for conditions that were ruled out. "
             "Always respond in Japanese."
         ),
     )
@@ -311,8 +318,14 @@ def step2b_search_similar_cases(findings: str) -> str:
     prompt = (
         f"以下は今回の画像解析で得られた所見です:\n\n{findings}\n\n"
         f"以下は過去の症例データベースです:\n\n{cases_text}\n\n"
-        "今回の所見に最も類似する過去症例を1〜2件選択し、"
-        "なぜ類似と判断したか、今回の診療にどう参考になるかを日本語で説明してください。"
+        "【重要な判断基準】\n"
+        "- 所見で異常が明確に指摘されている場合のみ、類似する過去症例を1〜2件選択してください。\n"
+        "- 所見が全て正常範囲内（異常なし・否定的所見のみ）の場合は、"
+        "'該当する類似症例はありません。全ての所見が正常範囲内のため、"
+        "過去の疾患症例との照合は不要です。'と回答してください。\n"
+        "- '否定された'所見に対応する疾患症例を類似として選択してはいけません。\n\n"
+        "類似症例がある場合は、なぜ類似と判断したか、"
+        "今回の診療にどう参考になるかを日本語で説明してください。"
     )
 
     return call_llm(
@@ -320,6 +333,9 @@ def step2b_search_similar_cases(findings: str) -> str:
         system=(
             "You are a clinical case retrieval agent. "
             "Find the most similar past cases and explain relevance. "
+            "CRITICAL: If all findings are normal (no abnormalities detected), "
+            "respond that no similar cases apply. "
+            "Do NOT match disease cases against findings that were ruled out. "
             "Always respond in Japanese."
         ),
     )
