@@ -3,7 +3,8 @@
 ワークフロー:
 1. VLMによる画像解析（所見抽出）
 2. Agentic RAG（ガイドライン知識検索 + 類似症例検索）
-3. 構造化臨床レポートの自動生成 + PDFエクスポート
+3. Self-RAG: 検索結果の自己評価 → 不十分なら再検索（最大1回）
+4. 構造化臨床レポートの自動生成 + PDFエクスポート
 """
 
 import base64
@@ -269,6 +270,103 @@ def step2b_search_similar_cases(findings: str) -> str:
     )
 
 
+def evaluate_search_result(
+    findings: str, guideline_result: str, similar_cases: str
+) -> bool:
+    """検索結果の十分性を自己評価する（Self-RAG / Corrective RAG）.
+
+    LLMに品質監査エージェントとして、検索結果が診断支援レポート作成に
+    十分な情報を含んでいるかを判定させる。
+
+    Args:
+        findings: 画像所見テキスト.
+        guideline_result: ガイドライン検索結果.
+        similar_cases: 類似症例検索結果.
+
+    Returns:
+        True: 十分（SUFFICIENT）、False: 不十分（INSUFFICIENT）.
+    """
+    prompt = (
+        f"以下の情報を検証してください。\n\n"
+        f"【画像所見】\n{findings}\n\n"
+        f"【検索されたガイドライン】\n{guideline_result}\n\n"
+        f"【検索された類似症例】\n{similar_cases}\n\n"
+        "上記の[画像所見]に対して、検索された[ガイドライン]と[類似症例]の内容が、"
+        "診断支援レポートを作成するために十分な情報を含んでいるか検証してください。\n"
+        "回答は必ず 'SUFFICIENT' または 'INSUFFICIENT' のいずれか1単語のみで出力してください。"
+    )
+
+    result = call_llm(
+        prompt=prompt,
+        system=(
+            "You are an objective medical quality audit agent. "
+            "Evaluate whether the retrieved information is sufficient "
+            "to generate a clinical support report for the given findings. "
+            "Respond with ONLY one word: 'SUFFICIENT' or 'INSUFFICIENT'."
+        ),
+    )
+
+    return "SUFFICIENT" in result.upper()
+
+
+def step2_retry_search(findings: str) -> tuple[str, str]:
+    """検索条件を広げて再検索する（リトライ用）.
+
+    初回検索で情報不足と判断された場合に、より広範な条件で
+    ガイドラインと症例を再検索する。
+
+    Args:
+        findings: 画像所見テキスト.
+
+    Returns:
+        (ガイドライン検索結果, 類似症例検索結果) のタプル.
+    """
+    guidelines_text = "\n".join(
+        f"- キー: {key} | 疾患: {g['condition']} | 対応: {g['action']} | 緊急度: {g['urgency']}"
+        for key, g in CLINICAL_GUIDELINES.items()
+    )
+
+    guideline_result = call_llm(
+        prompt=(
+            f"以下は画像解析で得られた所見です:\n\n{findings}\n\n"
+            f"以下は利用可能な臨床ガイドラインです:\n\n{guidelines_text}\n\n"
+            "前回の検索では情報が不十分と判断されました。"
+            "今回は所見に直接関連するものだけでなく、鑑別診断として考慮すべき"
+            "ガイドラインも含めて、より広範に選択してください。"
+            "各ガイドラインの適用理由を詳しく日本語で説明してください。"
+        ),
+        system=(
+            "You are a clinical decision support agent performing a broader search. "
+            "Include differential diagnoses and related conditions. "
+            "Always respond in Japanese."
+        ),
+    )
+
+    cases_text = "\n".join(
+        f"- 症例ID: {c['case_id']} | 年齢: {c['age']} | 性別: {c['sex']} | "
+        f"確定診断: {c['diagnosis']} | 所見: {c['findings']} | "
+        f"治療: {c['treatment']} | 転帰: {c['outcome']}"
+        for c in CASE_DATABASE
+    )
+
+    similar_cases = call_llm(
+        prompt=(
+            f"以下は今回の画像解析で得られた所見です:\n\n{findings}\n\n"
+            f"以下は過去の症例データベースです:\n\n{cases_text}\n\n"
+            "前回の検索では情報が不十分と判断されました。"
+            "今回は類似度が高い症例だけでなく、鑑別診断の参考になる症例も含めて"
+            "2〜3件選択し、それぞれの参考価値を日本語で詳しく説明してください。"
+        ),
+        system=(
+            "You are a clinical case retrieval agent performing a broader search. "
+            "Include cases useful for differential diagnosis. "
+            "Always respond in Japanese."
+        ),
+    )
+
+    return guideline_result, similar_cases
+
+
 def step3_generate_report(
     findings: str, guideline_result: str, similar_cases: str
 ) -> str:
@@ -422,22 +520,46 @@ def main() -> None:
 
             try:
                 # ステップ1: 画像解析
-                with st.spinner("🧠 Step 1/4: VLMによる画像解析中..."):
+                with st.spinner("🧠 Step 1/5: VLMによる画像解析中..."):
                     findings = step1_analyze_image(image_bytes)
                 st.session_state["findings"] = findings
 
                 # ステップ2: ガイドライン検索
-                with st.spinner("📚 Step 2/4: ガイドライン検索中..."):
+                with st.spinner("📚 Step 2/5: ガイドライン検索中..."):
                     guideline_result = step2_search_guidelines(findings)
                 st.session_state["guideline_result"] = guideline_result
 
                 # ステップ2b: 類似症例検索
-                with st.spinner("🔎 Step 3/4: 類似症例検索中..."):
+                with st.spinner("🔎 Step 3/5: 類似症例検索中..."):
                     similar_cases = step2b_search_similar_cases(findings)
                 st.session_state["similar_cases"] = similar_cases
 
+                # ステップ2c: 自己評価ループ（Self-RAG）
+                with st.spinner("🤖 Step 4/5: エージェントによる自己評価中..."):
+                    is_sufficient = evaluate_search_result(
+                        findings, guideline_result, similar_cases
+                    )
+
+                if is_sufficient:
+                    st.success(
+                        "✅ 自己評価: 十分な情報が収集されました。レポートを生成します。"
+                    )
+                else:
+                    st.warning(
+                        "⚠️ 自己評価: 情報不足と判断。検索条件を広げて再検索します..."
+                    )
+                    with st.spinner("🔄 再検索中（より広範な条件で実行）..."):
+                        guideline_result, similar_cases = step2_retry_search(findings)
+                    st.session_state["guideline_result"] = guideline_result
+                    st.session_state["similar_cases"] = similar_cases
+                    st.success("✅ 再検索完了。レポートを生成します。")
+
+                st.session_state["self_eval_result"] = (
+                    "SUFFICIENT" if is_sufficient else "INSUFFICIENT → 再検索実行"
+                )
+
                 # ステップ3: レポート生成
-                with st.spinner("📝 Step 4/4: 臨床レポート生成中..."):
+                with st.spinner("📝 Step 5/5: 臨床レポート生成中..."):
                     report = step3_generate_report(
                         findings, guideline_result, similar_cases
                     )
