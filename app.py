@@ -1,7 +1,8 @@
 """医療画像解析AIエージェント - 自律型診断支援システム.
 
 ワークフロー:
-1. VLMによる画像解析（所見抽出）
+0. モダリティ・ルーター（画像種別の自律判定 + ガードレール）
+1. VLMによる画像解析（動的プロンプト注入による精密所見抽出）
 2. Agentic RAG（ガイドライン知識検索 + 類似症例検索）
 3. Self-RAG: 検索結果の自己評価 → 不十分なら再検索（最大1回）
 4. 構造化臨床レポートの自動生成 + PDFエクスポート
@@ -20,6 +21,25 @@ from PIL import Image
 OLLAMA_BASE_URL = "http://localhost:11434"
 MODEL_NAME = "qwen2.5vl:3b"
 SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
+
+# --- モダリティ別読影チェックリスト（Dynamic Prompting用） ---
+MODALITY_CHECKLIST: dict[str, dict[str, str]] = {
+    "CHEST_XRAY": {
+        "label": "胸部X線",
+        "checklist": (
+            "肺野外側の血管影の有無による気胸の有無、"
+            "心陰影の拡大（心胸郭比CTR）、"
+            "浸潤影や結節影の有無を重点的に確認せよ"
+        ),
+    },
+    "BRAIN_MRI": {
+        "label": "脳腫瘍MRI",
+        "checklist": (
+            "腫瘍の有無、周囲の浮腫（むくみ）の広がり、"
+            "正中線構造のズレ（Midline Shift）の有無を重点的に確認せよ"
+        ),
+    },
+}
 
 # --- 模擬ガイドライン知識ベース（Mock RAG） ---
 CLINICAL_GUIDELINES: dict[str, dict[str, str]] = {
@@ -194,9 +214,43 @@ def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
     return buffer.getvalue()
 
 
-def step1_analyze_image(image_bytes: bytes) -> str:
-    """ステップ1: VLMによる画像解析（所見抽出）."""
+def step0_classify_modality(image_bytes: bytes) -> str:
+    """ステップ0: 画像モダリティの自律判定（モダリティ・ルーター）.
+
+    VLMが画像を分類し、CHEST_XRAY / BRAIN_MRI / UNKNOWN のいずれかを返す。
+    """
     resized = resize_image(image_bytes)
+    result = call_llm(
+        prompt=(
+            "この画像を分類してください。以下の3つのうち該当するものを1つだけ出力してください。\n"
+            "- CHEST_XRAY（胸部X線画像の場合）\n"
+            "- BRAIN_MRI（脳のMRI画像の場合）\n"
+            "- UNKNOWN（上記以外、または医療画像でない場合）\n\n"
+            "回答は CHEST_XRAY, BRAIN_MRI, UNKNOWN のいずれか1単語のみ出力してください。"
+        ),
+        system=(
+            "You are a medical image modality classifier. "
+            "Classify the image into exactly one category. "
+            "Respond with ONLY one word: CHEST_XRAY, BRAIN_MRI, or UNKNOWN."
+        ),
+        images=[base64.b64encode(resized).decode("utf-8")],
+    )
+    for modality in ("CHEST_XRAY", "BRAIN_MRI", "UNKNOWN"):
+        if modality in result.upper():
+            return modality
+    return "UNKNOWN"
+
+
+def step1_analyze_image(image_bytes: bytes, modality: str) -> str:
+    """ステップ1: VLMによる画像解析（動的プロンプト注入付き）."""
+    resized = resize_image(image_bytes)
+    checklist_info = MODALITY_CHECKLIST.get(modality, {})
+    checklist_injection = (
+        f"\n\n【読影重点チェックリスト】以下の点を特に注意して確認すること: "
+        f"{checklist_info['checklist']}"
+        if checklist_info
+        else ""
+    )
     return call_llm(
         prompt="この医療画像を解析し、詳細な所見を日本語で報告してください。",
         system=(
@@ -206,6 +260,7 @@ def step1_analyze_image(image_bytes: bytes) -> str:
             "and potential areas of concern. "
             "Respond in a structured, professional manner. "
             "Always respond in Japanese."
+            f"{checklist_injection}"
         ),
         images=[base64.b64encode(resized).decode("utf-8")],
     )
@@ -519,9 +574,29 @@ def main() -> None:
             image_bytes = uploaded_file.getvalue()
 
             try:
-                # ステップ1: 画像解析
-                with st.spinner("🧠 Step 1/5: VLMによる画像解析中..."):
-                    findings = step1_analyze_image(image_bytes)
+                # ステップ0: モダリティ判定（ルーター）
+                with st.spinner("🏷️ Step 0/5: 画像モダリティを自律判定中..."):
+                    modality = step0_classify_modality(image_bytes)
+                st.session_state["modality"] = modality
+
+                # ガードレール: UNKNOWN なら即時停止
+                if modality == "UNKNOWN":
+                    st.error(
+                        "🚫 医療用診断画像として認識できませんでした。"
+                        "有効な画像をアップロードしてください。"
+                    )
+                    st.stop()
+
+                # 判定結果の表示
+                modality_info = MODALITY_CHECKLIST[modality]
+                st.info(
+                    f"🤖 エージェント判定: 画像を **{modality_info['label']}** "
+                    f"({modality}) と判定し、専用の読影プロトコルを適用しました。"
+                )
+
+                # ステップ1: 動的プロンプト注入付き画像解析
+                with st.spinner("🧠 Step 1/5: VLMによる画像解析中（専用チェックリスト適用）..."):
+                    findings = step1_analyze_image(image_bytes, modality)
                 st.session_state["findings"] = findings
 
                 # ステップ2: ガイドライン検索
