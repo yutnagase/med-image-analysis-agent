@@ -2,8 +2,8 @@
 
 ワークフロー:
 1. VLMによる画像解析（所見抽出）
-2. Agentic RAG（ガイドライン知識検索）
-3. 構造化臨床レポートの自動生成
+2. Agentic RAG（ガイドライン知識検索 + 類似症例検索）
+3. 構造化臨床レポートの自動生成 + PDFエクスポート
 """
 
 import base64
@@ -12,6 +12,7 @@ from io import BytesIO
 
 import requests
 import streamlit as st
+from fpdf import FPDF
 from PIL import Image
 
 # --- 設定 ---
@@ -72,6 +73,55 @@ CLINICAL_GUIDELINES: dict[str, dict[str, str]] = {
         "urgency": "中",
     },
 }
+
+# --- 模擬症例データベース（Mock Case DB） ---
+CASE_DATABASE: list[dict[str, str]] = [
+    {
+        "case_id": "CXR-2024-001",
+        "age": "67歳",
+        "sex": "男性",
+        "diagnosis": "右下肺野肺炎",
+        "findings": "右下肺野にair bronchogramを伴う浸潤影",
+        "treatment": "アモキシシリン/クラブラン酸 経口投与、7日間",
+        "outcome": "72時間後の再検で改善確認、外来フォロー継続",
+    },
+    {
+        "case_id": "CXR-2024-002",
+        "age": "72歳",
+        "sex": "女性",
+        "diagnosis": "心拡大（高血圧性心疾患）",
+        "findings": "CTR 58%、肺うっ血軽度、Kerley B lines陽性",
+        "treatment": "利尿薬追加、降圧薬増量、心エコー精査",
+        "outcome": "2週間後の再検でCTR改善（52%）、心エコーでEF 45%",
+    },
+    {
+        "case_id": "CXR-2024-003",
+        "age": "45歳",
+        "sex": "男性",
+        "diagnosis": "左自然気胸",
+        "findings": "左肺虚脱率約30%、縦隔偏位なし",
+        "treatment": "胸腔ドレナージ施行、持続吸引",
+        "outcome": "5日後に肺拡張確認、ドレーン抜去",
+    },
+    {
+        "case_id": "CXR-2024-004",
+        "age": "58歳",
+        "sex": "女性",
+        "diagnosis": "右胸水（悪性胸膜中皮腫）",
+        "findings": "右肋骨横隔膜角鈍化、中等量胸水貯留",
+        "treatment": "胸腔穿刺で細胞診提出、胸膜生検追加",
+        "outcome": "細胞診Class V、腫瘍内科へ紹介",
+    },
+    {
+        "case_id": "CXR-2024-005",
+        "age": "81歳",
+        "sex": "男性",
+        "diagnosis": "両側肺炎（誤嚥性）",
+        "findings": "両側下肺野に斑状浸潤影、右優位",
+        "treatment": "入院加療、スルバクタム/アンピシリン静注、嚥下リハ開始",
+        "outcome": "7日後に改善傾向、14日後退院、嚥下機能評価継続",
+    },
+]
 
 DISCLAIMER = (
     "⚠️ **免責事項**: 本レポートはAIによる診断支援情報であり、"
@@ -190,15 +240,48 @@ def step2_search_guidelines(findings: str) -> str:
     )
 
 
-def step3_generate_report(findings: str, guideline_result: str) -> str:
+def step2b_search_similar_cases(findings: str) -> str:
+    """ステップ2b: 類似症例の自律検索.
+
+    LLMが所見を解釈し、症例DBから関連する過去症例を選択・要約する。
+    """
+    cases_text = "\n".join(
+        f"- 症例ID: {c['case_id']} | 年齢: {c['age']} | 性別: {c['sex']} | "
+        f"確定診断: {c['diagnosis']} | 所見: {c['findings']} | "
+        f"治療: {c['treatment']} | 転帰: {c['outcome']}"
+        for c in CASE_DATABASE
+    )
+
+    prompt = (
+        f"以下は今回の画像解析で得られた所見です:\n\n{findings}\n\n"
+        f"以下は過去の症例データベースです:\n\n{cases_text}\n\n"
+        "今回の所見に最も類似する過去症例を1〜2件選択し、"
+        "なぜ類似と判断したか、今回の診療にどう参考になるかを日本語で説明してください。"
+    )
+
+    return call_llm(
+        prompt=prompt,
+        system=(
+            "You are a clinical case retrieval agent. "
+            "Find the most similar past cases and explain relevance. "
+            "Always respond in Japanese."
+        ),
+    )
+
+
+def step3_generate_report(
+    findings: str, guideline_result: str, similar_cases: str
+) -> str:
     """ステップ3: 構造化臨床レポートの自動生成."""
     prompt = (
         f"以下の情報を基に、医師向けの構造化された診断支援レポートを生成してください。\n\n"
         f"【画像所見】\n{findings}\n\n"
         f"【ガイドライン検索結果】\n{guideline_result}\n\n"
+        f"【類似症例】\n{similar_cases}\n\n"
         "以下のMarkdown形式で出力してください:\n"
         "## 画像所見サマリー\n（所見の要約）\n\n"
         "## 推奨アクション\n（ガイドラインに基づく具体的な対応策）\n\n"
+        "## 類似症例リファレンス\n（過去症例との比較と参考情報）\n\n"
         "## 緊急度\n（低/中/高/緊急）\n\n"
         "## 追加検査の提案\n（必要に応じて）\n"
     )
@@ -211,6 +294,85 @@ def step3_generate_report(findings: str, guideline_result: str) -> str:
             "Be concise, professional, and actionable."
         ),
     )
+
+
+# --- PDF生成 ---
+def _strip_markdown(text: str) -> str:
+    """Markdown記法をプレーンテキストに変換する.
+
+    見出し行は「■」プレフィクスでマークし、PDF生成時にスタイル切替の目印とする。
+    """
+    import re
+    text = re.sub(r"^##\s*(.+)$", r"■\1", text, flags=re.MULTILINE)
+    text = re.sub(r"^#+\s*(.+)$", r"■\1", text, flags=re.MULTILINE)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"^[-*]\s+", "・", text, flags=re.MULTILINE)
+    return text
+
+
+def generate_pdf(report: str, findings: str, guideline_result: str) -> bytes:
+    """臨床レポートをPDFとして生成する.
+
+    Args:
+        report: 生成済みの臨床レポートテキスト.
+        findings: 画像所見テキスト.
+        guideline_result: ガイドライン検索結果テキスト.
+
+    Returns:
+        PDF文書のバイナリデータ.
+    """
+    pdf = FPDF()
+    pdf.add_page()
+
+    # 日本語フォント設定
+    font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+    pdf.add_font("NotoSansCJK", "", font_path)
+    pdf.set_font("NotoSansCJK", size=10)
+
+    # 有効描画幅を事前計算
+    content_width = pdf.w - pdf.l_margin - pdf.r_margin
+
+    # ヘッダー
+    pdf.set_font("NotoSansCJK", size=16)
+    pdf.cell(content_width, 12, "診断支援レポート", align="C")
+    pdf.ln(14)
+    pdf.set_font("NotoSansCJK", size=8)
+    pdf.cell(
+        content_width, 6,
+        f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Model: {MODEL_NAME}",
+        align="C",
+    )
+    pdf.ln(12)
+
+    # 本文（Markdown除去済み）
+    clean_report = _strip_markdown(report)
+    pdf.set_font("NotoSansCJK", size=10)
+    for line in clean_report.split("\n"):
+        if line.strip() == "":
+            pdf.ln(3)
+        elif line.startswith("■"):
+            pdf.ln(4)
+            pdf.set_font("NotoSansCJK", size=12)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(content_width, 8, line.replace("■", ""), align="L")
+            pdf.set_font("NotoSansCJK", size=10)
+        else:
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(content_width, 6, line, align="L")
+
+    # 免責事項
+    pdf.ln(10)
+    pdf.set_font("NotoSansCJK", size=8)
+    disclaimer_text = (
+        "【免責事項】本レポートはAIによる診断支援情報であり、"
+        "最終的な臨床判断は担当医師が行ってください。"
+        "本システムの出力は医療行為における確定診断を構成するものではありません。"
+    )
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(content_width, 5, disclaimer_text)
+
+    return bytes(pdf.output())
 
 
 # --- UI ---
@@ -260,18 +422,25 @@ def main() -> None:
 
             try:
                 # ステップ1: 画像解析
-                with st.spinner("🧠 Step 1/3: VLMによる画像解析中..."):
+                with st.spinner("🧠 Step 1/4: VLMによる画像解析中..."):
                     findings = step1_analyze_image(image_bytes)
                 st.session_state["findings"] = findings
 
                 # ステップ2: ガイドライン検索
-                with st.spinner("📚 Step 2/3: ガイドライン検索中..."):
+                with st.spinner("📚 Step 2/4: ガイドライン検索中..."):
                     guideline_result = step2_search_guidelines(findings)
                 st.session_state["guideline_result"] = guideline_result
 
+                # ステップ2b: 類似症例検索
+                with st.spinner("🔎 Step 3/4: 類似症例検索中..."):
+                    similar_cases = step2b_search_similar_cases(findings)
+                st.session_state["similar_cases"] = similar_cases
+
                 # ステップ3: レポート生成
-                with st.spinner("📝 Step 3/3: 臨床レポート生成中..."):
-                    report = step3_generate_report(findings, guideline_result)
+                with st.spinner("📝 Step 4/4: 臨床レポート生成中..."):
+                    report = step3_generate_report(
+                        findings, guideline_result, similar_cases
+                    )
                 st.session_state["report"] = report
 
             except requests.ConnectionError:
@@ -283,9 +452,10 @@ def main() -> None:
 
         # 結果表示（タブ切替）
         if "findings" in st.session_state:
-            tab1, tab2, tab3 = st.tabs([
+            tab1, tab2, tab3, tab4 = st.tabs([
                 "📋 画像所見",
                 "📚 ガイドライン検索",
+                "🔎 類似症例",
                 "📄 臨床レポート",
             ])
 
@@ -296,6 +466,9 @@ def main() -> None:
                 st.markdown(st.session_state["guideline_result"])
 
             with tab3:
+                st.markdown(st.session_state["similar_cases"])
+
+            with tab4:
                 st.markdown(st.session_state["report"])
                 st.divider()
                 st.markdown(DISCLAIMER)
@@ -303,6 +476,23 @@ def main() -> None:
                     f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"Model: {MODEL_NAME}"
                 )
+
+                # PDFエクスポート
+                try:
+                    pdf_bytes = generate_pdf(
+                        st.session_state["report"],
+                        st.session_state["findings"],
+                        st.session_state["guideline_result"],
+                    )
+                    st.download_button(
+                        label="📥 PDFレポートをダウンロード",
+                        data=pdf_bytes,
+                        file_name=f"clinical_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.warning(f"PDF生成に失敗しました: {e}")
 
 
 if __name__ == "__main__":
