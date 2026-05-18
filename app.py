@@ -19,7 +19,8 @@ from PIL import Image
 
 # --- 設定 ---
 OLLAMA_BASE_URL = "http://localhost:11434"
-MODEL_NAME = "qwen2.5vl:3b"
+VLM_MODEL = "rohithbojja/llava-med-v1.6"  # 医療特化VLM（画像解析用）
+TEXT_MODEL = "biomed-qwen"  # 医療特化LLM（RAG・レポート生成用）
 SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
 
 # --- モダリティ別読影チェックリスト（Dynamic Prompting用） ---
@@ -161,13 +162,16 @@ def check_ollama_health() -> bool:
         return False
 
 
-def call_llm(prompt: str, system: str, images: list[str] | None = None) -> str:
+def call_llm(
+    prompt: str, system: str, images: list[str] | None = None, model: str | None = None
+) -> str:
     """Ollama APIを呼び出し、LLM/VLMの応答を取得する.
 
     Args:
         prompt: ユーザープロンプト.
         system: システムプロンプト.
         images: Base64エンコード済み画像リスト（VLM使用時）.
+        model: 使用モデル名。未指定時は画像有無で自動選択.
 
     Returns:
         モデルの応答テキスト.
@@ -175,8 +179,9 @@ def call_llm(prompt: str, system: str, images: list[str] | None = None) -> str:
     Raises:
         RuntimeError: API呼び出しに失敗した場合.
     """
+    selected_model = model or (VLM_MODEL if images else TEXT_MODEL)
     payload: dict = {
-        "model": MODEL_NAME,
+        "model": selected_model,
         "prompt": prompt,
         "system": system,
         "stream": False,
@@ -187,7 +192,7 @@ def call_llm(prompt: str, system: str, images: list[str] | None = None) -> str:
     resp = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
         json=payload,
-        timeout=600,
+        timeout=1200,
     )
 
     if resp.status_code != 200:
@@ -208,6 +213,7 @@ def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
         リサイズ後のJPEGバイナリデータ.
     """
     img = Image.open(BytesIO(image_bytes))
+    img = img.convert("RGB")
     img.thumbnail((max_size, max_size))
     buffer = BytesIO()
     img.save(buffer, format="JPEG")
@@ -292,13 +298,11 @@ def step2_search_guidelines(findings: str) -> str:
     return call_llm(
         prompt=prompt,
         system=(
-            "You are a clinical decision support agent. "
-            "Based on imaging findings, search and retrieve the most relevant "
-            "clinical guidelines. "
-            "CRITICAL: If all findings are normal (no abnormalities detected), "
-            "you MUST select ONLY the 'normal' guideline. "
-            "Do NOT select disease-specific guidelines for conditions that were ruled out. "
-            "Always respond in Japanese."
+            "あなたは臨床判断支援エージェントです。"
+            "画像所見に基づき、最も関連する臨床ガイドラインを検索・選択してください。"
+            "重要: 全ての所見が正常（異常なし）の場合は、'normal'ガイドラインのみを選択すること。"
+            "否定された所見に対応する疾患ガイドラインを適用してはいけません。"
+            "必ず日本語で回答してください。"
         ),
     )
 
@@ -331,12 +335,11 @@ def step2b_search_similar_cases(findings: str) -> str:
     return call_llm(
         prompt=prompt,
         system=(
-            "You are a clinical case retrieval agent. "
-            "Find the most similar past cases and explain relevance. "
-            "CRITICAL: If all findings are normal (no abnormalities detected), "
-            "respond that no similar cases apply. "
-            "Do NOT match disease cases against findings that were ruled out. "
-            "Always respond in Japanese."
+            "あなたは臨床症例検索エージェントです。"
+            "最も類似する過去症例を検索し、関連性を説明してください。"
+            "重要: 全ての所見が正常（異常なし）の場合は、該当する類似症例はないと回答すること。"
+            "否定された所見に対応する疾患症例を類似として選択してはいけません。"
+            "必ず日本語で回答してください。"
         ),
     )
 
@@ -407,9 +410,9 @@ def step2_retry_search(findings: str) -> tuple[str, str]:
             "各ガイドラインの適用理由を詳しく日本語で説明してください。"
         ),
         system=(
-            "You are a clinical decision support agent performing a broader search. "
-            "Include differential diagnoses and related conditions. "
-            "Always respond in Japanese."
+            "あなたは臨床判断支援エージェントです。より広範な検索を実行しています。"
+            "鑑別診断や関連疾患も含めて選択してください。"
+            "必ず日本語で回答してください。"
         ),
     )
 
@@ -429,9 +432,9 @@ def step2_retry_search(findings: str) -> tuple[str, str]:
             "2〜3件選択し、それぞれの参考価値を日本語で詳しく説明してください。"
         ),
         system=(
-            "You are a clinical case retrieval agent performing a broader search. "
-            "Include cases useful for differential diagnosis. "
-            "Always respond in Japanese."
+            "あなたは臨床症例検索エージェントです。より広範な検索を実行しています。"
+            "鑑別診断の参考になる症例も含めて選択してください。"
+            "必ず日本語で回答してください。"
         ),
     )
 
@@ -509,7 +512,7 @@ def generate_pdf(report: str, findings: str, guideline_result: str) -> bytes:
     pdf.set_font("NotoSansCJK", size=8)
     pdf.cell(
         content_width, 6,
-        f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Model: {MODEL_NAME}",
+        f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | VLM: {VLM_MODEL} | Text: {TEXT_MODEL}",
         align="C",
     )
     pdf.ln(12)
@@ -554,7 +557,9 @@ def main() -> None:
     )
 
     st.title("🏥 Medical Image Analysis Agent")
-    st.caption(f"Model: `{MODEL_NAME}` | Runtime: Ollama (CPU) | Agentic RAG Pipeline")
+    st.caption(
+        f"VLM: `{VLM_MODEL}` | Text: `{TEXT_MODEL}` | Runtime: Ollama (CPU) | Agentic RAG Pipeline"
+    )
 
     # Ollamaヘルスチェック
     if not check_ollama_health():
@@ -687,7 +692,7 @@ def main() -> None:
                 st.markdown(DISCLAIMER)
                 st.caption(
                     f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-                    f"Model: {MODEL_NAME}"
+                    f"VLM: {VLM_MODEL} | Text: {TEXT_MODEL}"
                 )
 
                 # PDFエクスポート
