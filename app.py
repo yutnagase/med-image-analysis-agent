@@ -9,6 +9,7 @@
 """
 
 import base64
+import logging
 from datetime import datetime
 from io import BytesIO
 
@@ -17,10 +18,20 @@ import streamlit as st
 from fpdf import FPDF
 from PIL import Image
 
+# --- ロギング設定 ---
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 # --- 設定 ---
 OLLAMA_BASE_URL = "http://localhost:11434"
 VLM_MODEL = "rohithbojja/llava-med-v1.6"  # 医療特化VLM（画像解析用）
 TEXT_MODEL = "biomed-qwen"  # 医療特化LLM（RAG・レポート生成用）
+KEEP_ALIVE = "30m"  # モデルをメモリに保持する時間
 SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
 
 # --- モダリティ別読影チェックリスト（Dynamic Prompting用） ---
@@ -28,16 +39,27 @@ MODALITY_CHECKLIST: dict[str, dict[str, str]] = {
     "CHEST_XRAY": {
         "label": "胸部X線",
         "checklist": (
-            "肺野外側の血管影の有無による気胸の有無、"
-            "心陰影の拡大（心胸郭比CTR）、"
-            "浸潤影や結節影の有無を重点的に確認せよ"
+            "以下の項目を左右それぞれについて系統的に評価せよ。"
+            "1. 気胸の有無: 肺野外側に肺紋理が消失した無血管領域（黒い透亮帯）がないか、"
+            "胸膜線（visceral pleural line）が見えないか、"
+            "縦隔偏位（対側へのシフト）がないか。"
+            "2. 心胸郭比（CTR）: 心陰影の横径が胸郭横径の50%を超えていないか。"
+            "3. 肺野の異常陰影: 浸潤影（肺炎）、結節影（腫瘍）、網状影（間質性肺炎）の有無。"
+            "4. 肋骨横隔膜角（CP angle）: 鈍化がないか（胸水の徴候）。"
+            "5. 骨構造: 肋骨骨折、椎体圧迫骨折の有無。"
         ),
     },
     "BRAIN_MRI": {
         "label": "脳腫瘍MRI",
         "checklist": (
-            "腫瘍の有無、周囲の浮腫（むくみ）の広がり、"
-            "正中線構造のズレ（Midline Shift）の有無を重点的に確認せよ"
+            "以下の項目を系統的に評価せよ。"
+            "1. 腫瘍の有無と特徴: 異常な信号強度の腫瘤があるか、"
+            "境界は明瞭か不明瞭か、均一か不均一か、"
+            "造影剤による増強効果のパターン（環状増強、均一増強等）。"
+            "2. 周囲浮腫（血管原性浮腫）: T2/FLAIRで高信号の浮腫が腫瘍周囲にどの程度広がっているか。"
+            "3. 正中線偏位（Midline Shift）: 透明中隔・第三脳室が対側に圧排されていないか、偏位量はmm単位で推定。"
+            "4. 脳室系: 側脳室の拡大や圧排、閉塞性水頭症の徴候がないか。"
+            "5. 脳ヘルニアの徴候: 小脳扁桃の下垂、脚橋槽の圧排がないか。"
         ),
     },
 }
@@ -162,6 +184,31 @@ def check_ollama_health() -> bool:
         return False
 
 
+def warmup_model(model: str) -> bool:
+    """モデルを事前ロードしてウォームアップする.
+
+    空のプロンプトでモデルをメモリにロードさせ、
+    初回推論時の不安定な応答を防止する。
+
+    Returns:
+        True: ウォームアップ成功、False: 失敗.
+    """
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": model, "prompt": "", "keep_alive": KEEP_ALIVE},
+            timeout=300,
+        )
+        if resp.status_code == 200:
+            logger.info("[Warmup] Model '%s' loaded successfully.", model)
+            return True
+        logger.error("[Warmup] Failed to load '%s': %d", model, resp.status_code)
+        return False
+    except (requests.ConnectionError, requests.Timeout) as e:
+        logger.error("[Warmup] Error loading '%s': %s", model, e)
+        return False
+
+
 def call_llm(
     prompt: str, system: str, images: list[str] | None = None, model: str | None = None
 ) -> str:
@@ -185,9 +232,13 @@ def call_llm(
         "prompt": prompt,
         "system": system,
         "stream": False,
+        "keep_alive": KEEP_ALIVE,
     }
     if images:
         payload["images"] = images
+
+    logger.info("[LLM Request] model=%s, has_images=%s", selected_model, bool(images))
+    logger.debug("[LLM Request] prompt=%s", prompt[:200])
 
     resp = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -196,9 +247,13 @@ def call_llm(
     )
 
     if resp.status_code != 200:
+        logger.error("[LLM Error] status=%d, body=%s", resp.status_code, resp.text[:500])
         raise RuntimeError(f"Ollama API error: {resp.status_code} - {resp.text}")
 
-    return resp.json()["response"]
+    response_text = resp.json()["response"]
+    logger.info("[LLM Response] model=%s, length=%d", selected_model, len(response_text))
+    logger.debug("[LLM Response] content=%s", response_text[:500])
+    return response_text
 
 
 # --- エージェント・ワークフロー ---
@@ -220,12 +275,8 @@ def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
     return buffer.getvalue()
 
 
-def step0_classify_modality(image_bytes: bytes) -> str:
-    """ステップ0: 画像モダリティの自律判定（モダリティ・ルーター）.
-
-    VLMが画像を分類し、CHEST_XRAY / BRAIN_MRI / UNKNOWN のいずれかを返す。
-    """
-    resized = resize_image(image_bytes)
+def _single_classify(image_b64: str) -> str:
+    """単一回のモダリティ分類を実行する."""
     result = call_llm(
         prompt=(
             "この画像を分類してください。以下の3つのうち該当するものを1つだけ出力してください。\n"
@@ -239,12 +290,45 @@ def step0_classify_modality(image_bytes: bytes) -> str:
             "Classify the image into exactly one category. "
             "Respond with ONLY one word: CHEST_XRAY, BRAIN_MRI, or UNKNOWN."
         ),
-        images=[base64.b64encode(resized).decode("utf-8")],
+        images=[image_b64],
     )
     for modality in ("CHEST_XRAY", "BRAIN_MRI", "UNKNOWN"):
         if modality in result.upper():
             return modality
     return "UNKNOWN"
+
+
+def step0_classify_modality(image_bytes: bytes) -> str:
+    """ステップ0: 画像モダリティの自律判定（多数決方式）.
+
+    VLMの分類精度が不安定なため3回試行し、多数決で最終判定する。
+    """
+    resized = resize_image(image_bytes)
+    image_b64 = base64.b64encode(resized).decode("utf-8")
+    logger.info(
+        "[Step0] input_size=%d bytes, resized_size=%d bytes",
+        len(image_bytes), len(resized),
+    )
+
+    # 3回試行して多数決
+    votes: list[str] = []
+    for i in range(3):
+        vote = _single_classify(image_b64)
+        votes.append(vote)
+        logger.info("[Step0] Trial %d: %s", i + 1, vote)
+
+    # 多数決（UNKNOWN以外が1票でもあればそちらを優先）
+    from collections import Counter
+    counts = Counter(votes)
+    # UNKNOWN以外の票がある場合、その中で最多を採用
+    non_unknown = {k: v for k, v in counts.items() if k != "UNKNOWN"}
+    if non_unknown:
+        result = max(non_unknown, key=non_unknown.get)
+    else:
+        result = "UNKNOWN"
+
+    logger.info("[Step0] Votes=%s -> Final: %s", votes, result)
+    return result
 
 
 def step1_analyze_image(image_bytes: bytes, modality: str) -> str:
@@ -258,12 +342,20 @@ def step1_analyze_image(image_bytes: bytes, modality: str) -> str:
         else ""
     )
     return call_llm(
-        prompt="この医療画像を解析し、詳細な所見を日本語で報告してください。",
+        prompt=(
+            "この医療画像を解析し、詳細な所見を日本語で報告してください。\n\n"
+            "報告は以下の形式で出力すること:\n"
+            "【各項目の所見】チェックリストの各項目について、正常/異常を明記\n"
+            "【総合診断印象】上記所見を総合し、疑われる疾患名を明記すること。"
+            "異常所見がある場合は必ず「異常あり: ○○の疑い」と明記すること。"
+        ),
         system=(
             "You are a medical imaging analysis assistant. "
             "Describe the uploaded medical image in detail, "
             "including anatomical structures, any notable findings, "
             "and potential areas of concern. "
+            "You MUST provide a final diagnostic impression that explicitly states "
+            "the suspected condition name if any abnormality is found. "
             "Respond in a structured, professional manner. "
             "Always respond in Japanese."
             f"{checklist_injection}"
@@ -572,6 +664,15 @@ def main() -> None:
 
     st.success("✅ Ollama接続確認済み")
 
+    # VLMモデルのウォームアップ（初回のみ）
+    if "vlm_warmed_up" not in st.session_state:
+        with st.spinner("🔄 VLMモデルをロード中（初回のみ、数分かかります）..."):
+            if warmup_model(VLM_MODEL):
+                st.session_state["vlm_warmed_up"] = True
+            else:
+                st.error("VLMモデルのロードに失敗しました。Ollamaの状態を確認してください。")
+                st.stop()
+
     # 画像アップロード
     uploaded_file = st.file_uploader(
         "医療画像をアップロード",
@@ -579,7 +680,12 @@ def main() -> None:
         help="X線・CT・MRI等の画像ファイル (PNG/JPEG)",
     )
 
-    if uploaded_file is None:
+    # アップロード画像をsession_stateに保存（セッション切断対策）
+    if uploaded_file is not None:
+        st.session_state["image_bytes"] = uploaded_file.getvalue()
+        st.session_state["image_name"] = uploaded_file.name
+
+    if "image_bytes" not in st.session_state:
         st.info("👆 画像ファイルを選択してください。")
         return
 
@@ -588,11 +694,11 @@ def main() -> None:
 
     with col_image:
         st.subheader("📷 アップロード画像")
-        st.image(uploaded_file, use_container_width=True)
+        st.image(st.session_state["image_bytes"], use_container_width=True)
 
     with col_result:
         if st.button("🔍 エージェント解析を実行", type="primary", use_container_width=True):
-            image_bytes = uploaded_file.getvalue()
+            image_bytes = st.session_state["image_bytes"]
 
             try:
                 # ステップ0: モダリティ判定（ルーター）
