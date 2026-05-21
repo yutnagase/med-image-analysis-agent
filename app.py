@@ -30,7 +30,7 @@ logger.setLevel(logging.DEBUG)
 # --- 設定 ---
 OLLAMA_BASE_URL = "http://localhost:11434"
 VLM_MODEL = "rohithbojja/llava-med-v1.6"  # 医療特化VLM（画像解析用）
-TEXT_MODEL = "biomed-qwen"  # 医療特化LLM（RAG・レポート生成用）
+TEXT_MODEL = "qwen3.5:4b"  # LLM（RAG・レポート生成用）
 KEEP_ALIVE = "30m"  # モデルをメモリに保持する時間
 SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
 

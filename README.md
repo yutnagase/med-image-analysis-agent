@@ -1,6 +1,24 @@
 # 🏥 Medical Image Analysis Agent
 
-医療用診断画像をVLM（Vision-Language Model）で解析し、ガイドライン検索・レポート生成まで自律的に行うAIエージェントのPoC。
+医療用診断画像をVLM（Vision-Language Model）で解析し、ガイドライン検索・レポート生成まで自律的に行うAIエージェントのPoCです
+
+## 初めに断り書きさせて頂きます
+GPU非搭載のローカルPCでも一応動作しますが、1枚の画像診断で30分～60分くらいかかりました（メモリ約12GB割り当て環境）
+また、非力のローカルPCで開発していたので、画像解析用LLMとして ** llava-med-v1.6 **, テキスト処理用として ** qwen3.5:4b ** を使用するのが限度でした。
+若干、画像解析結果、回答文の精度は低いかもしれません
+
+適宜、モデルを差し替えて抱くことで、制度がアップするかと思いますので、各位でお試しいただきたく存じます
+
+## 画面イメージ
+### 画像所見
+![image1](docs/images/image1.png)
+### ガイドライン検索
+![image2](docs/images/image2.png)
+### 類似症例
+![image3](docs/images/image3.png)
+### 臨床レポート
+![image4](docs/images/image4.png)
+
 
 ## アーキテクチャ
 
@@ -106,9 +124,19 @@
 
 ## セットアップ
 
+### 0. GitHubよりClone
+```
+git clone https://github.com/yutnagase/med-image-analysis-agent.git
+
+```
+
 ### 1. Ollamaのインストールとモデル取得
 
 ```bash
+
+# インストール前に必要なツールをインストール
+sudo apt-get install zstd
+
 # Ollamaインストール
 curl -fsSL https://ollama.com/install.sh | sh
 
@@ -116,7 +144,8 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull rohithbojja/llava-med-v1.6
 
 # 医療特化LLM（テキスト処理用）
-ollama pull biomed-qwen
+~~ollama pull biomed-qwen~~
+ollama pull qwen3.5:4b
 ```
 
 ### 2. Python仮想環境のセットアップ
@@ -259,6 +288,28 @@ Not enough horizontal space to render a single character
 - 各 `multi_cell` の前に `set_x(l_margin)` でカーソル位置をリセット
 - 全テキストに `align="L"`（左揃え）を指定し、両端揃えによる文字飛びを防止
 - `pdf.output()` が `bytearray` を返すため `bytes()` で変換してStreamlitに渡す
+
+## 注意：Ollamaモデルの可用性と仕様変更について
+
+Ollamaの公式レジストリ（モデルライブラリ）は定期的にメンテナンスされており、非公式のカスタムモデルや古い検証用モデルは、予告なく削除または名前の変更が行われる仕様になっているようです。
+そのため、過去に動作していたモデル（例: `biomed-qwen` など）が、再構築時（`ollama pull` 実行時）に `Error: pull model manifest: file does not exist` となり取得できなくなるリスクがあります。
+
+### 万が一モデルが取得エラーになった場合の対処法
+
+モデルがレジストリから削除されてエラーになった場合は、トリッキーな別名作成（偽装）は行わず、以下の手順で**その時点での最新の公式標準モデルに差し替える「正攻法」**での対応を推奨します。
+
+1. **最新モデルの取得（ターミナル）**
+   現在入手可能な最新の安定モデル（例: `qwen3.5:4b` など）をOllama公式からプルします。
+   ```bash
+   ollama pull qwen3.5:4b
+   ```
+
+2. **ソースコードの修正（VS Code）**
+   本リポジトリのPythonソースコード内にあるモデル指定変数（`TEXT_MODEL` など）を、直接新しいモデル名に書き換えて保存してください。
+   ```python
+   # 修正例
+   TEXT_MODEL = "qwen3.5:4b"  # 古い "biomed-qwen" から書き換え
+   ```
 
 ## 開発ログ
 
