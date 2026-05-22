@@ -1,0 +1,9 @@
+{
+    "case_id": "CXR-2024-001",
+    "age": "67歳",
+    "sex": "男性",
+    "diagnosis": "右下肺野肺炎",
+    "findings": "右下肺野にair bronchogramを伴う浸潤影",
+    "treatment": "アモキシシリン/クラブラン酸 経口投与、7日間",
+    "outcome": "72時間後の再検で改善確認"
+}
