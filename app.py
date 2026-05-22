@@ -39,7 +39,7 @@ SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
 
 # --- 知識ベースのロード ---
 def load_knowledge_base():
-    """medical_documentsフォルダからMODALITY_CHECKLISTとCLINICAL_GUIDELINESをロード"""
+    """medical_documentsフォルダからJSONをロード（優先）"""
     base_dir = Path("./medical_documents")
     
     # 1. MODALITY_CHECKLIST
@@ -50,7 +50,8 @@ def load_knowledge_base():
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    modality_checklist.update(data)  # 複数のチェックリストをマージ
+                    modality_checklist.update(data)
+                logger.info(f"チェックリスト読み込み成功: {file.name}")
             except Exception as e:
                 logger.warning(f"モダリティチェックリスト読み込み失敗 {file}: {e}")
     
@@ -62,23 +63,45 @@ def load_knowledge_base():
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # キー名をファイル名ベースにする（またはJSON内のkeyを使う）
                     key = file.stem
                     clinical_guidelines[key] = data
+                logger.info(f"ガイドライン読み込み成功: {file.name}")
             except Exception as e:
                 logger.warning(f"ガイドライン読み込み失敗 {file}: {e}")
     
-    # フォールバック（ファイルが無い場合は元のハードコードを使用）
+    # フォールバック（ファイルが存在しないor空の場合）
     if not modality_checklist:
         logger.warning("modality_checklists が見つからないため、ハードコードを使用します。")
         modality_checklist = {
-            "CHEST_XRAY": { ... },  # 下部の元の内容をここに残す（後述）
-            "BRAIN_MRI": { ... },
+            "CHEST_XRAY": {
+                "name": "胸部X線",
+                "checklist": "心拡大、肺野異常影、胸水、気胸、縦隔異常、骨異常などを重点確認"
+            },
+            "BRAIN_MRI": {
+                "name": "脳MRI",
+                "checklist": "腫瘍、出血、梗塞、萎縮、白質病変、血管異常などを重点確認"
+            }
         }
     
     if not clinical_guidelines:
         logger.warning("guidelines が見つからないため、ハードコードを使用します。")
-        clinical_guidelines = { ... }  # 元のCLINICAL_GUIDELINES
+        clinical_guidelines = {
+            "normal": {
+                "condition": "正常所見",
+                "action": "定期健診でのフォロー",
+                "urgency": "低"
+            },
+            "pneumonia": {
+                "condition": "肺炎",
+                "action": "抗菌薬投与、必要時入院",
+                "urgency": "中"
+            },
+            "cardiomegaly": {
+                "condition": "心拡大",
+                "action": "心エコー精査、BNP測定",
+                "urgency": "中"
+            }
+        }
     
     return modality_checklist, clinical_guidelines
 
@@ -86,8 +109,8 @@ def load_knowledge_base():
 # ロード実行
 MODALITY_CHECKLIST, CLINICAL_GUIDELINES = load_knowledge_base()
 
-# --- 模擬症例データベース（Mock Case DB） ---
-CASE_DATABASE: list[dict[str, str]] = [
+# --- 模擬症例データベース（まだハードコード） ---
+CASE_DATABASE: list[dict] = [
     {
         "case_id": "CXR-2024-001",
         "age": "67歳",
@@ -95,7 +118,7 @@ CASE_DATABASE: list[dict[str, str]] = [
         "diagnosis": "右下肺野肺炎",
         "findings": "右下肺野にair bronchogramを伴う浸潤影",
         "treatment": "アモキシシリン/クラブラン酸 経口投与、7日間",
-        "outcome": "72時間後の再検で改善確認、外来フォロー継続",
+        "outcome": "72時間後の再検で改善確認",
     },
     {
         "case_id": "CXR-2024-002",
@@ -141,7 +164,6 @@ DISCLAIMER = (
     "本システムの出力は医療行為における確定診断を構成するものではありません。"
 )
 
-
 # --- Ollama API ---
 def check_ollama_health() -> bool:
     """Ollamaサーバーの稼働状態を確認する."""
@@ -178,7 +200,10 @@ def warmup_model(model: str) -> bool:
 
 
 def call_llm(
-    prompt: str, system: str, images: list[str] | None = None, model: str | None = None
+    prompt: str, 
+    system: str, 
+    images: list[str] | None = None, 
+    model: str | None = None
 ) -> str:
     """Ollama APIを呼び出し、LLM/VLMの応答を取得する.
 
@@ -195,7 +220,7 @@ def call_llm(
         RuntimeError: API呼び出しに失敗した場合.
     """
     selected_model = model or (VLM_MODEL if images else TEXT_MODEL)
-    payload: dict = {
+    payload = {
         "model": selected_model,
         "prompt": prompt,
         "system": system,
@@ -224,7 +249,7 @@ def call_llm(
     return response_text
 
 
-# --- エージェント・ワークフロー ---
+# --- エージェント機能 ---
 def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
     """画像を指定サイズ以下にリサイズする.
 
@@ -246,18 +271,8 @@ def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
 def _single_classify(image_b64: str) -> str:
     """単一回のモダリティ分類を実行する."""
     result = call_llm(
-        prompt=(
-            "この画像を分類してください。以下の3つのうち該当するものを1つだけ出力してください。\n"
-            "- CHEST_XRAY（胸部X線画像の場合）\n"
-            "- BRAIN_MRI（脳のMRI画像の場合）\n"
-            "- UNKNOWN（上記以外、または医療画像でない場合）\n\n"
-            "回答は CHEST_XRAY, BRAIN_MRI, UNKNOWN のいずれか1単語のみ出力してください。"
-        ),
-        system=(
-            "You are a medical image modality classifier. "
-            "Classify the image into exactly one category. "
-            "Respond with ONLY one word: CHEST_XRAY, BRAIN_MRI, or UNKNOWN."
-        ),
+        prompt="この画像を分類してください。CHEST_XRAY, BRAIN_MRI, UNKNOWN のいずれか1単語のみ出力。",
+        system="You are a medical image modality classifier. Respond with ONLY one word.",
         images=[image_b64],
     )
     for modality in ("CHEST_XRAY", "BRAIN_MRI", "UNKNOWN"):
@@ -304,28 +319,15 @@ def step1_analyze_image(image_bytes: bytes, modality: str) -> str:
     resized = resize_image(image_bytes)
     checklist_info = MODALITY_CHECKLIST.get(modality, {})
     checklist_injection = (
-        f"\n\n【読影重点チェックリスト】以下の点を特に注意して確認すること: "
-        f"{checklist_info['checklist']}"
-        if checklist_info
-        else ""
+        f"\n\n【重点チェックリスト】{checklist_info.get('checklist', '')}"
+        if checklist_info else ""
     )
+    
     return call_llm(
-        prompt=(
-            "この医療画像を解析し、詳細な所見を日本語で報告してください。\n\n"
-            "報告は以下の形式で出力すること:\n"
-            "【各項目の所見】チェックリストの各項目について、正常/異常を明記\n"
-            "【総合診断印象】上記所見を総合し、疑われる疾患名を明記すること。"
-            "異常所見がある場合は必ず「異常あり: ○○の疑い」と明記すること。"
-        ),
+        prompt="この医療画像を詳細に解析し、日本語で所見を報告してください。",
         system=(
-            "You are a medical imaging analysis assistant. "
-            "Describe the uploaded medical image in detail, "
-            "including anatomical structures, any notable findings, "
-            "and potential areas of concern. "
-            "You MUST provide a final diagnostic impression that explicitly states "
-            "the suspected condition name if any abnormality is found. "
-            "Respond in a structured, professional manner. "
-            "Always respond in Japanese."
+            "You are a radiologist. Provide detailed findings in Japanese. "
+            "Always include a final diagnostic impression."
             f"{checklist_injection}"
         ),
         images=[base64.b64encode(resized).decode("utf-8")],
@@ -339,31 +341,15 @@ def step2_search_guidelines(findings: str) -> str:
     自律的に選択・抽出させる。
     """
     guidelines_text = "\n".join(
-        f"- キー: {key} | 疾患: {g['condition']} | 対応: {g['action']} | 緊急度: {g['urgency']}"
+        f"- {key}: {g.get('condition', '')} | 対応: {g.get('action', '')} | 緊急度: {g.get('urgency', '')}"
         for key, g in CLINICAL_GUIDELINES.items()
     )
-
-    prompt = (
-        f"以下は画像解析で得られた所見です:\n\n{findings}\n\n"
-        f"以下は利用可能な臨床ガイドラインです:\n\n{guidelines_text}\n\n"
-        "【重要な判断基準】\n"
-        "- 所見で異常が明確に指摘されている場合のみ、該当する疾患ガイドラインを選択してください。\n"
-        "- 所見が全て正常範囲内（異常なし・否定的所見のみ）の場合は、"
-        "'normal'（正常所見）ガイドラインのみを選択してください。\n"
-        "- '否定された'所見に対応する疾患ガイドラインを適用してはいけません。\n\n"
-        "上記の所見に最も関連するガイドラインを選択し、"
-        "なぜそのガイドラインが適用されるのか理由を含めて日本語で回答してください。"
-    )
-
+    
+    prompt = f"以下の所見に基づき、最も関連するガイドラインを選択して説明してください。\n\n所見:\n{findings}\n\nガイドライン:\n{guidelines_text}"
+    
     return call_llm(
         prompt=prompt,
-        system=(
-            "あなたは臨床判断支援エージェントです。"
-            "画像所見に基づき、最も関連する臨床ガイドラインを検索・選択してください。"
-            "重要: 全ての所見が正常（異常なし）の場合は、'normal'ガイドラインのみを選択すること。"
-            "否定された所見に対応する疾患ガイドラインを適用してはいけません。"
-            "必ず日本語で回答してください。"
-        ),
+        system="あなたは臨床判断支援エージェントです。根拠に基づいて回答してください。"
     )
 
 
