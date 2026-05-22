@@ -1,0 +1,5 @@
+{
+  "condition": "心拡大（Cardiomegaly）",
+  "action": "心胸郭比（CTR）の計測を実施。CTR > 50%の場合、心エコー検査を追加オーダーし、心不全・弁膜症・高血圧性心疾患の鑑別を行う。BNP/NT-proBNP測定を推奨。",
+  "urgency": "中"
+}
