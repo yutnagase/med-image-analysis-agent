@@ -39,7 +39,7 @@ SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
 
 # --- 知識ベースのロード ---
 def load_knowledge_base():
-    """medical_documentsフォルダからJSONをロード（優先）"""
+    """medical_documentsフォルダからMODALITY_CHECKLISTとCLINICAL_GUIDELINESをロード"""
     base_dir = Path("./medical_documents")
     
     # 1. MODALITY_CHECKLIST
@@ -51,7 +51,7 @@ def load_knowledge_base():
                 with open(file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     modality_checklist.update(data)
-                logger.info(f"チェックリスト読み込み成功: {file.name}")
+                logger.info(f"✅ チェックリスト読み込み成功: {file.name}")
             except Exception as e:
                 logger.warning(f"モダリティチェックリスト読み込み失敗 {file}: {e}")
     
@@ -65,46 +65,45 @@ def load_knowledge_base():
                     data = json.load(f)
                     key = file.stem
                     clinical_guidelines[key] = data
-                logger.info(f"ガイドライン読み込み成功: {file.name}")
+                logger.info(f"✅ ガイドライン読み込み成功: {file.name}")
             except Exception as e:
                 logger.warning(f"ガイドライン読み込み失敗 {file}: {e}")
     
-    # フォールバック（ファイルが存在しないor空の場合）
+    # フォールバック（ファイルが無いor空の場合）
     if not modality_checklist:
-        logger.warning("modality_checklists が見つからないため、ハードコードを使用します。")
+        logger.warning("modality_checklists フォルダが見つからないか空のため、ハードコードを使用します。")
         modality_checklist = {
             "CHEST_XRAY": {
-                "name": "胸部X線",
+                "label": "胸部X線",
                 "checklist": "心拡大、肺野異常影、胸水、気胸、縦隔異常、骨異常などを重点確認"
             },
             "BRAIN_MRI": {
-                "name": "脳MRI",
+                "label": "脳MRI",
                 "checklist": "腫瘍、出血、梗塞、萎縮、白質病変、血管異常などを重点確認"
             }
         }
     
     if not clinical_guidelines:
-        logger.warning("guidelines が見つからないため、ハードコードを使用します。")
+        logger.warning("guidelines フォルダが見つからないか空のため、ハードコードを使用します。")
         clinical_guidelines = {
             "normal": {
                 "condition": "正常所見",
-                "action": "定期健診でのフォロー",
+                "action": "定期的な経過観察",
                 "urgency": "低"
             },
             "pneumonia": {
                 "condition": "肺炎",
-                "action": "抗菌薬投与、必要時入院",
+                "action": "抗菌薬投与、必要時入院精査",
                 "urgency": "中"
             },
             "cardiomegaly": {
                 "condition": "心拡大",
-                "action": "心エコー精査、BNP測定",
+                "action": "心エコー検査、BNP測定、循環器精査",
                 "urgency": "中"
             }
         }
     
     return modality_checklist, clinical_guidelines
-
 
 # ロード実行
 MODALITY_CHECKLIST, CLINICAL_GUIDELINES = load_knowledge_base()
