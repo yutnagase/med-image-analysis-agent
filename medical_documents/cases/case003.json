@@ -1,0 +1,9 @@
+{
+    "case_id": "CXR-2024-003",
+    "age": "68歳",
+    "sex": "男性",
+    "diagnosis": "うっ血性心不全（収縮機能障害、EF 35%）",
+    "findings": "CTR 65%の高度心拡大、両側肺門部陰影の拡大・不明瞭化、上肺野血管影のcephalization、両側肺底部にKerley B線、両側少量胸水（CP angle鈍化）",
+    "treatment": "フロセミド静注40mg、ACE阻害薬・β遮断薬の導入、入院管理",
+    "outcome": "5日間の入院加療でSpO2改善、胸部X線でうっ血所見軽快"
+}

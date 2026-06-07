@@ -47,8 +47,8 @@ GPU非搭載のローカルPCでも一応動作しますが、1枚の画像診�
       ▼
 [Ollama API] → タスク特性に応じたモデル動的選択（CPU駆動）
       │
-      ├→ 画像解析: [rohithbojja/llava-med-v1.6] (医療特化VLM・7B)
-      └→ テキスト処理: [biomed-qwen] (医療特化LLM・軽量)
+      ├→ 画像解析: [qwen2.5vl:7b] (デフォルト・サイドバーで切替可能)
+      └→ テキスト処理: [qwen3.5:4b] (軽量LLM)
 ```
 
 ### モダリティ・ルーター（Router）と動的プロンプト注入（Dynamic Prompting）
@@ -116,11 +116,13 @@ GPU非搭載のローカルPCでも一応動作しますが、1枚の画像診�
 
 | 項目 | 要件 |
 |------|------|
-| OS | Ubuntu (WSL2) |
+| OS | Ubuntu (WSL2) / macOS |
 | Python | 3.10+ |
-| メモリ | 12GB (Swap: 4GB) |
-| GPU | 不要（CPU駆動） |
+| メモリ | 12GB以上（推奨: 16GB以上） |
+| GPU | 不要（CPU駆動） / Apple Silicon は Metal GPU自動使用 |
 | Ollama | インストール済み |
+
+> **Apple Silicon (M1/M2/M3/M4) macOSの場合:** OllamaがMetalを自動使用するためCPU駆動より大幅に高速です。40GB統合メモリ環境ではVLM・LLMの同時ロードも可能です。
 
 ## セットアップ
 
@@ -133,20 +135,34 @@ git clone https://github.com/yutnagase/med-image-analysis-agent.git
 ### 1. Ollamaのインストールとモデル取得
 
 ```bash
-
-# インストール前に必要なツールをインストール
+# --- Linux (Ubuntu / WSL2) ---
 sudo apt-get install zstd
-
-# Ollamaインストール
 curl -fsSL https://ollama.com/install.sh | sh
 
-# 医療特化VLM（画像解析用）
-ollama pull rohithbojja/llava-med-v1.6
+# --- macOS ---
+# Homebrew経由でインストール（https://ollama.com からDLも可）
+brew install ollama
+```
 
-# 医療特化LLM（テキスト処理用）
-~~ollama pull biomed-qwen~~
+```bash
+# 画像解析用VLM（デフォルト推奨）
+ollama pull qwen2.5vl:7b
+
+# テキスト処理用LLM
 ollama pull qwen3.5:4b
 ```
+
+> **Note:** Web画面のサイドバーから以下のモデルも選択可能です。事前に `ollama pull` してください。
+>
+> | モデル | サイズ | RAM目安 | 備考 |
+> |---|---|---|---|
+> | `qwen2.5vl:7b` | 6.0 GB | 8GB以上 | **推奨・デフォルト** |
+> | `rohithbojja/llava-med-v1.6` | 4.7 GB | 8GB以上 | 医療特化 ⚠️ レジストリから削除される場合あり |
+> | `minicpm-v:8b` | 5.5 GB | 8GB以上 | 清華大学OpenBMB開発 |
+> | `llava:13b` | 8.0 GB | 16GB以上 | 高精度汎用 |
+> | `llava:34b` | 19.7 GB | 32GB以上 | 最高精度 |
+>
+> ⚠️ **Apple Silicon (macOS) での注意**: `qwen2.5vl:32b` はOllamaのCLIPモデルローダーにApple Silicon対応バグがあり動作しません（[ollama#16264](https://github.com/ollama/ollama/issues/16264)）。
 
 ### 2. Python仮想環境のセットアップ
 
@@ -158,9 +174,14 @@ pip install -r requirements.txt
 
 ### 3. 日本語フォントのインストール（PDF出力用）
 
+**macOSの場合はスキップ可能です。** `Arial Unicode.ttf`（標準搭載）が自動的に使用されます。
+
 ```bash
+# Linux (Ubuntu / WSL2) のみ実行
 sudo apt install -y fonts-noto-cjk
 ```
+
+> **Note:** フォントパスはOS別に自動検出されます（macOS: Arial Unicode → ヒラギノ、Linux: Noto Sans CJK の順で探索）。
 
 ## 実行方法
 
@@ -182,18 +203,19 @@ streamlit run app.py
 
 ## 使い方
 
-1. 画面上で医療画像（PNG/JPEG）をアップロード
-2. 「🔍 エージェント解析を実行」ボタンをクリック
-3. 6ステップのエージェント・パイプラインが順次実行される:
+1. **左サイドバーのプルダウン**で使用するVLMモデルを選択（事前に `ollama pull` が必要）
+2. 画面上で医療画像（PNG/JPEG）をアップロード
+3. 「🔍 エージェント解析を実行」ボタンをクリック
+4. 6ステップのエージェント・パイプラインが順次実行される:
    - Step 0: モダリティ・ルーターによる画像種別の自律判定（UNKNOWN なら安全停止）
-   - Step 1: 専用チェックリストを動的注入したVLM画像解析
+   - Step 1: 専用チェックリスト（18項目）を動的注入したVLM画像解析
    - Step 2: ガイドラインからの推奨アクション検索
    - Step 3: 過去の類似症例の検索・抽出
    - Step 4: エージェントによる自己評価（不十分なら再検索）
    - Step 5: 医師向け臨床レポートの自動生成
-4. 画面上部にエージェントの判断履歴（「画像を ◯◯ と判定し、専用の読影プロトコルを適用しました」）がリアルタイム表示される
-5. タブ切替で「画像所見」「ガイドライン検索結果」「類似症例」「臨床レポート」を確認
-6. 「📥 PDFレポートをダウンロード」ボタンでレポートをPDF保存
+5. 画面上部にエージェントの判断履歴（「画像を ◯◯ と判定し、専用の読影プロトコルを適用しました」）がリアルタイム表示される
+6. タブ切替で「画像所見」「ガイドライン検索結果」「類似症例」「臨床レポート」を確認
+7. 「📥 PDFレポートをダウンロード」ボタンでレポートをPDF保存
 
 ## トラブルシューティング
 
@@ -244,6 +266,27 @@ def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
     img.save(buffer, format="JPEG")
     return buffer.getvalue()
 ```
+
+### macOS Apple Silicon での qwen2.5vl:32b CLIPエラー
+
+```
+llama-server process has terminated: exit status 1:
+error: Failed to load CLIP model from ...
+```
+
+**原因:** OllamaのApple Silicon（Metal）バックエンドにおけるCLIPビジョンエンコーダのローダーにバグがあり、32Bモデルのロードが失敗する（[ollama#16264](https://github.com/ollama/ollama/issues/16264)）。7Bは正常動作する。
+
+**解決:** `qwen2.5vl:7b` など7Bクラスのモデルを使用する。
+
+### macOS での日本語フォントエラー（PDF出力）
+
+```
+RuntimeError: 日本語フォントが見つかりません
+```
+
+**原因:** Linuxの `/usr/share/fonts/...` パスをmacOSで参照しようとしている古いバージョン。
+
+**解決:** 最新版ではフォントパスを自動検出（`Arial Unicode.ttf` → ヒラギノ → Linux Noto の優先順）。macOSでは日本語フォント追加インストール不要。
 
 ### CPU駆動でのタイムアウト
 
@@ -321,3 +364,5 @@ Ollamaの公式レジストリ（モデルライブラリ）は定期的にメ�
 | Step 4 | モダリティ・ルーター + Dynamic Prompting | 一本道パイプラインから自律分岐型エージェントへ昇華。UNKNOWN判定時のガードレール（Early Exit）実装 |
 | Step 5 | デュアルモデル・アーキテクチャ | 汎用VLMから医療特化モデルへ移行。タスク適応型モデル選択によりエージェントの自律性を強化 |
 | Step 6 | 安定性改善 | VLM分類の不安定性を多数決方式で解決。セッション切断対策（session_state画像保存）、モデル保持時間延長（keep_alive: 30m）、ウォームアップ機構を追加 |
+| Step 7 | 診断精度改善 | チェックリストを5項目→18項目に拡充（心不全特有所見: Cephalization・Kerley B線・butterfly pattern追加）。CTR測定方法を数値明示。プロンプトに「1陽性所見=異常疑い」ルール追加。Step2で「総合評価ラベル無視・個別所見優先」指示を追加 |
+| Step 8 | モデル・環境対応 | VLMをqwen2.5vl:7bに変更。画像リサイズを512→1024pxに緩和。macOS対応（フォントパス自動検出・Apple Silicon Metal GPU利用）。サイドバーでVLMモデルをプルダウン選択できる機能を追加 |

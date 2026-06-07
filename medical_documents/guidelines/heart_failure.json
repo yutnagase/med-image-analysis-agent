@@ -1,0 +1,11 @@
+{
+  "condition": "心不全（Heart Failure）・肺うっ血（Pulmonary Congestion）",
+  "xray_findings": "肺門部陰影の拡大・不明瞭化、上肺野への血管影逆転（cephalization）、Kerley B線（肺底部外側の水平線状影3〜4cm以内）、肺野のびまん性または肺門周囲のスリガラス影（butterfly/batwing pattern）、両側胸水（CP angle鈍化）、心拡大（CTR > 50%）の合併",
+  "severity_criteria": {
+    "軽度うっ血": "cephalizationのみ、CTR軽度増大",
+    "中等度うっ血": "Kerley B線、肺門部不明瞭化、少量胸水",
+    "重度うっ血（肺水腫）": "butterfly pattern、大量胸水、低酸素血症"
+  },
+  "action": "1. 直ちに酸素投与・SpO2モニタリング。2. BNP/NT-proBNP・トロポニン・電解質・腎機能測定。3. ループ利尿薬（フロセミド静注）投与。4. 体位管理（坐位・半坐位）。5. 原因検索（ACS・弁膜症・不整脈・高血圧緊急症）。6. 心エコー緊急施行。7. 入院管理・必要に応じてICU。",
+  "urgency": "高〜緊急"
+}

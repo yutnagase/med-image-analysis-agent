@@ -32,10 +32,49 @@ logger.setLevel(logging.DEBUG)
 
 # --- 設定 ---
 OLLAMA_BASE_URL = "http://localhost:11434"
-VLM_MODEL = "rohithbojja/llava-med-v1.6"
+VLM_MODEL = "qwen2.5vl:7b"
 TEXT_MODEL = "qwen3.5:4b"
 KEEP_ALIVE = "30m"
 SUPPORTED_FORMATS = ["png", "jpg", "jpeg", "dicom"]
+
+# --- VLMモデル選択肢 ---
+VLM_MODEL_OPTIONS = [
+    {
+        "id": "qwen2.5vl:7b",
+        "label": "Qwen2.5-VL 7B ⭐ 推奨",
+        "size": "6.0 GB",
+        "ram": "8GB以上",
+        "desc": "汎用VLM。安定動作・バランス良好（現在の標準モデル）",
+    },
+    {
+        "id": "rohithbojja/llava-med-v1.6",
+        "label": "LLaVA-Med v1.6（医療特化）",
+        "size": "4.7 GB",
+        "ram": "8GB以上",
+        "desc": "医療画像データセットでFine-tuning済み ⚠️ Ollamaレジストリから削除される場合あり",
+    },
+    {
+        "id": "minicpm-v:8b",
+        "label": "MiniCPM-V 8B（軽量高性能）",
+        "size": "5.5 GB",
+        "ram": "8GB以上",
+        "desc": "清華大学OpenBMB開発。軽量ながら高いVLM性能",
+    },
+    {
+        "id": "llava:13b",
+        "label": "LLaVA 13B（高精度汎用）",
+        "size": "8.0 GB",
+        "ram": "16GB以上",
+        "desc": "7Bより高精度な汎用VLM。中スペック環境向け",
+    },
+    {
+        "id": "llava:34b",
+        "label": "LLaVA 34B（最高精度）",
+        "size": "19.7 GB",
+        "ram": "32GB以上",
+        "desc": "最高精度。大容量RAM環境向け（M4 Pro 40GB等）",
+    },
+]
 
 # --- 知識ベースのロード ---
 def load_knowledge_base():
@@ -211,7 +250,7 @@ def call_llm(
 
 
 # --- エージェント機能 ---
-def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
+def resize_image(image_bytes: bytes, max_size: int = 1024) -> bytes:
     """画像を指定サイズ以下にリサイズする.
 
     Args:
@@ -229,12 +268,13 @@ def resize_image(image_bytes: bytes, max_size: int = 512) -> bytes:
     return buffer.getvalue()
 
 
-def _single_classify(image_b64: str) -> str:
+def _single_classify(image_b64: str, vlm_model: str = VLM_MODEL) -> str:
     """単一回のモダリティ分類を実行する."""
     result = call_llm(
         prompt="この画像を分類してください。CHEST_XRAY, BRAIN_MRI, UNKNOWN のいずれか1単語のみ出力。",
         system="You are a medical image modality classifier. Respond with ONLY one word.",
         images=[image_b64],
+        model=vlm_model,
     )
     for modality in ("CHEST_XRAY", "BRAIN_MRI", "UNKNOWN"):
         if modality in result.upper():
@@ -242,7 +282,7 @@ def _single_classify(image_b64: str) -> str:
     return "UNKNOWN"
 
 
-def step0_classify_modality(image_bytes: bytes) -> str:
+def step0_classify_modality(image_bytes: bytes, vlm_model: str = VLM_MODEL) -> str:
     """ステップ0: 画像モダリティの自律判定（多数決方式）.
 
     VLMの分類精度が不安定なため3回試行し、多数決で最終判定する。
@@ -257,7 +297,7 @@ def step0_classify_modality(image_bytes: bytes) -> str:
     # 3回試行して多数決
     votes: list[str] = []
     for i in range(3):
-        vote = _single_classify(image_b64)
+        vote = _single_classify(image_b64, vlm_model=vlm_model)
         votes.append(vote)
         logger.info("[Step0] Trial %d: %s", i + 1, vote)
 
@@ -275,7 +315,7 @@ def step0_classify_modality(image_bytes: bytes) -> str:
     return result
 
 
-def step1_analyze_image(image_bytes: bytes, modality: str) -> str:
+def step1_analyze_image(image_bytes: bytes, modality: str, vlm_model: str = VLM_MODEL) -> str:
     """ステップ1: VLMによる画像解析（動的プロンプト注入付き）."""
     resized = resize_image(image_bytes)
     checklist_info = MODALITY_CHECKLIST.get(modality, {})
@@ -285,13 +325,27 @@ def step1_analyze_image(image_bytes: bytes, modality: str) -> str:
     )
     
     return call_llm(
-        prompt="この医療画像を詳細に解析し、日本語で所見を報告してください。",
+        prompt=(
+            "この医療画像に異常所見がないか積極的に探してください。"
+            "微細な濃度差・陰影・パターンの変化も見逃さず評価してください。"
+            "チェックリストの各項目について必ず言及し、"
+            "異常・正常のいずれであっても根拠を示して報告してください。"
+            "【重要ルール】チェックリストの項目で1つでも陽性（異常疑い）所見があれば、"
+            "総合印象は必ず「異常疑い」とすること。"
+            "全18項目が完全に正常と確認できた場合のみ「正常」と判定してください。"
+        ),
         system=(
-            "You are a radiologist. Provide detailed findings in Japanese. "
-            "Always include a final diagnostic impression."
+            "You are an experienced radiologist with expertise in detecting subtle abnormalities. "
+            "Your job is to actively look for pathological findings, not to confirm normality. "
+            "Even subtle or borderline findings should be reported. "
+            "CRITICAL RULE: If ANY single checklist item shows a positive/abnormal finding, "
+            "the final impression MUST be 'abnormal' (異常疑い). "
+            "Only conclude 'normal' (正常) when ALL items are definitively normal. "
+            "Provide a systematic and detailed report in Japanese."
             f"{checklist_injection}"
         ),
         images=[base64.b64encode(resized).decode("utf-8")],
+        model=vlm_model,
     )
 
 
@@ -306,11 +360,20 @@ def step2_search_guidelines(findings: str) -> str:
         for key, g in CLINICAL_GUIDELINES.items()
     )
     
-    prompt = f"以下の所見に基づき、最も関連するガイドラインを選択して説明してください。\n\n所見:\n{findings}\n\nガイドライン:\n{guidelines_text}"
-    
+    prompt = (
+        f"以下の画像所見の【個別項目の内容】を注意深く読み、最も関連するガイドラインを選択して説明してください。\n\n"
+        f"【重要】「総合評価」「総合印象」などのラベル文字列は参考にしないでください。"
+        f"個々の所見項目（陽性・陰性の内容）だけを根拠にガイドラインを選択すること。\n\n"
+        f"所見:\n{findings}\n\nガイドライン:\n{guidelines_text}"
+    )
+
     return call_llm(
         prompt=prompt,
-        system="あなたは臨床判断支援エージェントです。根拠に基づいて回答してください。"
+        system=(
+            "あなたは臨床判断支援エージェントです。"
+            "所見の『総合評価』ラベルに引きずられず、各項目の実際の内容を根拠に判断してください。"
+            "陽性所見が1つでもあれば、それに対応するガイドラインを優先的に選択してください。"
+        )
     )
 
 
@@ -480,19 +543,27 @@ def generate_pdf(report: str, findings: str, guideline_result: str) -> bytes:
     pdf = FPDF()
     pdf.add_page()
 
-    # 日本語フォント設定
-    font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-    pdf.add_font("NotoSansCJK", "", font_path)
-    pdf.set_font("NotoSansCJK", size=10)
+    # 日本語フォント設定（OS別に候補を探索）
+    font_candidates = [
+        "/Library/Fonts/Arial Unicode.ttf",                          # macOS 標準（最優先）
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",           # macOS フォールバック
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Linux
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",   # Linux 別パス
+    ]
+    font_path = next((p for p in font_candidates if Path(p).exists()), None)
+    if font_path is None:
+        raise RuntimeError("日本語フォントが見つかりません。Arial Unicode または Noto Sans CJK をインストールしてください。")
+    pdf.add_font("JapaneseFont", "", font_path)
+    pdf.set_font("JapaneseFont", size=10)
 
     # 有効描画幅を事前計算
     content_width = pdf.w - pdf.l_margin - pdf.r_margin
 
     # ヘッダー
-    pdf.set_font("NotoSansCJK", size=16)
+    pdf.set_font("JapaneseFont", size=16)
     pdf.cell(content_width, 12, "診断支援レポート", align="C")
     pdf.ln(14)
-    pdf.set_font("NotoSansCJK", size=8)
+    pdf.set_font("JapaneseFont", size=8)
     pdf.cell(
         content_width, 6,
         f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | VLM: {VLM_MODEL} | Text: {TEXT_MODEL}",
@@ -502,23 +573,23 @@ def generate_pdf(report: str, findings: str, guideline_result: str) -> bytes:
 
     # 本文（Markdown除去済み）
     clean_report = _strip_markdown(report)
-    pdf.set_font("NotoSansCJK", size=10)
+    pdf.set_font("JapaneseFont", size=10)
     for line in clean_report.split("\n"):
         if line.strip() == "":
             pdf.ln(3)
         elif line.startswith("■"):
             pdf.ln(4)
-            pdf.set_font("NotoSansCJK", size=12)
+            pdf.set_font("JapaneseFont", size=12)
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(content_width, 8, line.replace("■", ""), align="L")
-            pdf.set_font("NotoSansCJK", size=10)
+            pdf.set_font("JapaneseFont", size=10)
         else:
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(content_width, 6, line, align="L")
 
     # 免責事項
     pdf.ln(10)
-    pdf.set_font("NotoSansCJK", size=8)
+    pdf.set_font("JapaneseFont", size=8)
     disclaimer_text = (
         "【免責事項】本レポートはAIによる診断支援情報であり、"
         "最終的な臨床判断は担当医師が行ってください。"
@@ -540,8 +611,43 @@ def main() -> None:
     )
 
     st.title("🏥 Medical Image Analysis Agent")
+
+    # --- サイドバー: VLMモデル選択 ---
+    with st.sidebar:
+        st.header("⚙️ モデル設定")
+        model_ids = [m["id"] for m in VLM_MODEL_OPTIONS]
+        model_labels = [
+            f"{m['label']}  ({m['size']} / RAM {m['ram']})"
+            for m in VLM_MODEL_OPTIONS
+        ]
+        default_idx = model_ids.index(VLM_MODEL) if VLM_MODEL in model_ids else 0
+        selected_idx = st.selectbox(
+            "VLM（画像解析モデル）",
+            range(len(model_ids)),
+            format_func=lambda i: model_labels[i],
+            index=default_idx,
+            key="vlm_selector",
+        )
+        selected_vlm = model_ids[selected_idx]
+        selected_info = VLM_MODEL_OPTIONS[selected_idx]
+        st.caption(selected_info["desc"])
+
+        # モデルが変わったらウォームアップをリセット
+        if st.session_state.get("vlm_model") != selected_vlm:
+            st.session_state["vlm_model"] = selected_vlm
+            st.session_state.pop("vlm_warmed_up", None)
+
+        st.divider()
+        st.caption(f"テキストモデル: `{TEXT_MODEL}`")
+
+        # ollama pull コマンドの案内
+        with st.expander("モデルの取得方法"):
+            st.code(f"ollama pull {selected_vlm}", language="bash")
+    # サイドバーで選択されたモデルを使用
+    active_vlm = st.session_state.get("vlm_model", VLM_MODEL)
+
     st.caption(
-        f"VLM: `{VLM_MODEL}` | Text: `{TEXT_MODEL}` | Runtime: Ollama (CPU) | Agentic RAG Pipeline"
+        f"VLM: `{active_vlm}` | Text: `{TEXT_MODEL}` | Runtime: Ollama | Agentic RAG Pipeline"
     )
 
     # Ollamaヘルスチェック
@@ -555,10 +661,10 @@ def main() -> None:
 
     st.success("✅ Ollama接続確認済み")
 
-    # VLMモデルのウォームアップ（初回のみ）
+    # VLMモデルのウォームアップ（モデル変更時も再実行）
     if "vlm_warmed_up" not in st.session_state:
-        with st.spinner("🔄 VLMモデルをロード中（初回のみ、数分かかります）..."):
-            if warmup_model(VLM_MODEL):
+        with st.spinner(f"🔄 {active_vlm} をロード中（初回のみ、数分かかります）..."):
+            if warmup_model(active_vlm):
                 st.session_state["vlm_warmed_up"] = True
             else:
                 st.error("VLMモデルのロードに失敗しました。Ollamaの状態を確認してください。")
@@ -594,7 +700,7 @@ def main() -> None:
             try:
                 # ステップ0: モダリティ判定（ルーター）
                 with st.spinner("🏷️ Step 0/5: 画像モダリティを自律判定中..."):
-                    modality = step0_classify_modality(image_bytes)
+                    modality = step0_classify_modality(image_bytes, vlm_model=active_vlm)
                 st.session_state["modality"] = modality
 
                 # ガードレール: UNKNOWN なら即時停止
@@ -614,7 +720,7 @@ def main() -> None:
 
                 # ステップ1: 動的プロンプト注入付き画像解析
                 with st.spinner("🧠 Step 1/5: VLMによる画像解析中（専用チェックリスト適用）..."):
-                    findings = step1_analyze_image(image_bytes, modality)
+                    findings = step1_analyze_image(image_bytes, modality, vlm_model=active_vlm)
                 st.session_state["findings"] = findings
 
                 # ステップ2: ガイドライン検索
