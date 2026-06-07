@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -226,6 +227,7 @@ def call_llm(
         "system": system,
         "stream": False,
         "keep_alive": KEEP_ALIVE,
+        "options": {"num_ctx": 8192},
     }
     if images:
         payload["images"] = images
@@ -244,6 +246,8 @@ def call_llm(
         raise RuntimeError(f"Ollama API error: {resp.status_code} - {resp.text}")
 
     response_text = resp.json()["response"]
+    # 推論モデル（qwen3系等）が出力する<think>ブロックを除去して本文のみ抽出
+    response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
     logger.info("[LLM Response] model=%s, length=%d", selected_model, len(response_text))
     logger.debug("[LLM Response] content=%s", response_text[:500])
     return response_text
@@ -722,16 +726,25 @@ def main() -> None:
                 with st.spinner("🧠 Step 1/5: VLMによる画像解析中（専用チェックリスト適用）..."):
                     findings = step1_analyze_image(image_bytes, modality, vlm_model=active_vlm)
                 st.session_state["findings"] = findings
+                with st.expander("📋 Step 1 完了: 画像所見", expanded=True):
+                    st.markdown(findings)
 
                 # ステップ2: ガイドライン検索
                 with st.spinner("📚 Step 2/5: ガイドライン検索中..."):
                     guideline_result = step2_search_guidelines(findings)
                 st.session_state["guideline_result"] = guideline_result
+                with st.expander("📚 Step 2 完了: ガイドライン検索結果", expanded=True):
+                    if guideline_result:
+                        st.markdown(guideline_result)
+                    else:
+                        st.warning("モデルから有効な応答が得られませんでした。再解析をお試しください。")
 
                 # ステップ2b: 類似症例検索
                 with st.spinner("🔎 Step 3/5: 類似症例検索中..."):
                     similar_cases = step2b_search_similar_cases(findings)
                 st.session_state["similar_cases"] = similar_cases
+                with st.expander("🔎 Step 3 完了: 類似症例", expanded=True):
+                    st.markdown(similar_cases)
 
                 # ステップ2c: 自己評価ループ（Self-RAG）
                 with st.spinner("🤖 Step 4/5: エージェントによる自己評価中..."):
@@ -763,6 +776,10 @@ def main() -> None:
                         findings, guideline_result, similar_cases
                     )
                 st.session_state["report"] = report
+                with st.expander("📄 Step 5 完了: 臨床レポート", expanded=True):
+                    st.markdown(report)
+                st.success("✅ 全ステップ完了。下のタブから結果を確認できます。")
+                st.rerun()
 
             except requests.ConnectionError:
                 st.error("Ollamaサーバーとの接続が切断されました。")
@@ -771,8 +788,8 @@ def main() -> None:
             except RuntimeError as e:
                 st.error(f"解析エラー: {e}")
 
-        # 結果表示（タブ切替）
-        if "findings" in st.session_state:
+        # 結果表示（タブ切替）- 全ステップ完了時のみ表示
+        if "report" in st.session_state:
             tab1, tab2, tab3, tab4 = st.tabs([
                 "📋 画像所見",
                 "📚 ガイドライン検索",
@@ -810,7 +827,7 @@ def main() -> None:
                         data=pdf_bytes,
                         file_name=f"clinical_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                         mime="application/pdf",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 except Exception as e:
                     st.warning(f"PDF生成に失敗しました: {e}")
